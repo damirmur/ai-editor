@@ -511,5 +511,8 @@ export default {
   cmdValidate,
   cmdMkdir,
   cmdDiff,
-  cmdHelp
+  cmdHelp,
+  help: cmdHelp
 };
+
+export { cmdHelp };

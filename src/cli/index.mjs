@@ -1,158 +1,153 @@
-#!/usr/bin/env node
+// src/cli/index.mjs - CLI entry point with JSON input support
+import commands from './commands.mjs';
 
-/**
- * AI-File Editor - Main CLI Entry Point
- * 
- * Usage: node index.mjs <command> [options]
- * 
- * Available commands:
- *   read    - Read file content
- *   edit    - Edit/write file
- *   search  - Search for pattern in file
- *   validate - Validate and parse file format
- *   mkdir   - Create directories
- *   diff    - Compare two files
- *   help    - Show this help message
- */
+const { cmdRead, cmdEdit, cmdSearch, cmdValidate, cmdMkdir, cmdDiff, cmdHelp } = commands;
 
-import { createInterface } from 'readline';
-import commands, { cmdHelp } from './commands.mjs';
-import fs from 'fs';
-
-const rl = createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
-
-/**
- * Parse command line arguments
- */
-function parseArgs() {
+async function parseArgs() {
   const args = process.argv.slice(2);
-  
+
   if (args.length === 0) {
-    return commands.cmdHelp({})();
+    return await cmdHelp();
   }
 
-  const [command, ...options] = args;
-  const parsedOptions = {};
+  let commandSpec;
 
-  // Parse options
-  for (let i = 0; i < options.length; i++) {
-    if (options[i].startsWith('--')) {
-      const key = options[i].slice(2);
-      
-      // Check for value in next option or remaining args
-      let value = null;
-      
-      if (i + 1 < options.length && !options[i + 1].startsWith('--') && options[i + 1] !== 'true' && options[i + 1] !== 'false') {
-        value = options[++i];
-      } else if (options.includes('true')) {
-        value = true;
-      } else if (options.includes('false')) {
-        value = false;
-      }
+  try {
+    commandSpec = JSON.parse(args[0]);
+  } catch (e) {
+    // Not valid JSON - treat as positional args: node index.mjs <cmd> [key=value...]
+    const inputString = args.join(' ');
+    const parts = inputString.trim().split(/\s+/);
 
-      parsedOptions[key] = value === null ? '' : value;
-    } else if (!parsedOptions.path && !parsedOptions.query) {
-      // Positional arguments for commands that don't use -- flags
-      if (!parsedOptions.path) {
-        parsedOptions.path = options[i];
-      } else if (!parsedOptions.query) {
-        parsedOptions.query = options[i];
+    if (!parts.length) {
+      throw new Error('No command provided');
+    }
+
+    const cmdName = parts[0];
+    const paramStr = parts.slice(1).join(' ');
+
+    let paramsObj = {};
+
+    if (paramStr.startsWith('{')) {
+      try {
+        paramsObj = JSON.parse(paramStr);
+      } catch (e) {
+        throw new Error(`Invalid JSON parameters: ${e.message}`);
       }
-    } else if (!parsedOptions.path1 && !parsedOptions.path2) {
-      // For diff command which takes two paths
-      if (!parsedOptions.path1) {
-        parsedOptions.path1 = options[i];
-      } else if (!parsedOptions.path2) {
-        parsedOptions.path2 = options[i];
+    } else if (paramStr && paramStr.includes('=')) {
+      // Parse key=value pairs
+      const kvPairs = paramStr.split('&').filter(Boolean);
+      for (const pair of kvPairs) {
+        const [key, ...valParts] = pair.split('=');
+        paramsObj[key.trim()] = valParts.join('=').replace(/\\n/g, '\n').trim();
       }
     }
+
+    if (!cmdName || !commands[cmdName]) {
+      return {
+        success: false,
+        error: `Unknown command: ${cmdName}`,
+        details: ['Available commands: read, edit, search, validate, tsconfig, yaml, mkdir, diff, help']
+      };
+    }
+
+    const cmdHelpInfo = await cmdHelp();
+    
+    return {
+      success: false,
+      error: `Unknown command: ${cmdName}`,
+      details: ['Use "help" to see available commands'],
+      helpText: typeof cmdHelpInfo === 'string' ? cmdHelpInfo : ''
+    };
   }
 
-  return parseCommand(command, parsedOptions);
-}
+  const [command, ...params] = commandSpec.name ? [commandSpec.name] : [];
 
-/**
- * Parse and execute command
- */
-function parseCommand(command, options) {
-  const cmdHandlers = [
-    ['read', commands.cmdRead],
-    ['edit', commands.cmdEdit],
-    ['search', commands.cmdSearch],
-    ['validate', commands.cmdValidate],
-    ['tsconfig', (args) => commands.cmdTsConfig(args)],
-    ['yaml', (args) => commands.cmdYaml(args)],
-    ['mkdir', commands.cmdMkdir],
-    ['diff', commands.cmdDiff]
-  ];
+  if (!command || !commands[command]) {
+    return {
+      success: false,
+      error: `Unknown or invalid command: ${command}`,
+      details: ['Use "help" to see available commands']
+    };
+  }
 
-  // Find matching command handler
-  const selectedHandler = cmdHandlers.find(([cmdName]) => cmdName.toLowerCase() === command.toLowerCase());
-  
-  if (!selectedHandler) {
-    return JSON.stringify({
-      error: `Unknown command: ${command}`,
-      availableCommands: cmdHandlers.map(([cmd]) => cmd[0].name),
-      usage: 'node index.mjs <command> [options]'
+  const paramsObj = Array.isArray(params) && params.length > 0 ? params[0] : {};
+
+  try {
+    return await executeCommand(command, paramsObj).catch(e => {
+      console.error('Error in executeCommand:', e.message);
+      throw e;
     });
+  } catch (err) {
+    throw new Error(`Execution error: ${err.message}`);
   }
+}
 
-  const selectedCmd = selectedHandler;
-  
-  if (!selectedCmd) {
-    return JSON.stringify({
+async function executeCommand(command, options) {
+  const handler = commands[command];
+
+  if (!handler || typeof handler !== 'function') {
+    return {
+      success: false,
       error: `Unknown command: ${command}`,
-      availableCommands: cmdHandlers.map(([cmd]) => cmd[0].name),
-      usage: 'node index.mjs <command> [options]'
-    });
+      details: ['Available commands: read, edit, search, validate, tsconfig, yaml, mkdir, diff, help']
+    };
   }
 
-  // Execute the selected command
-  const result = selectedCmd[1](options);
-  
-  return typeof result.then === 'function' 
-    ? result.then(r => JSON.stringify(r)) 
-    : JSON.stringify(result());
+  try {
+    const result = await handler(options);
+
+    if (!result.success) {
+      return {
+        success: false,
+        error: result.error || 'Command execution failed'
+      };
+    }
+
+    return {
+      success: true,
+      data: result.data || {}
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err.message || 'Unexpected error',
+      stack: err.stack
+    };
+  }
 }
 
-/**
- * Handle error and output JSON
- */
-function handleError(error) {
-  console.error(JSON.stringify({
-    error: error.message || 'Unknown error occurred',
-    stack: error.stack,
-    timestamp: new Date().toISOString()
-  }));
-  
-  process.exit(1);
-}
-
-/**
- * Main entry point
- */
 async function main() {
   try {
-    // Parse and execute command
-    const result = parseArgs();
-    
+    const result = await parseArgs();
+
     if (typeof result === 'string') {
       console.log(result);
     } else {
-      console.log(JSON.stringify(result));
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } catch (error) {
+    const errorResult = {
+      success: false,
+      error: error.message || 'Unknown error'
+    };
+
+    if (error.stack) {
+      errorResult.stack = error.stack;
     }
 
-  } catch (error) {
-    handleError(error);
+    console.error(errorResult);
+    process.exit(1);
   }
 }
 
-// Default export for CLI usage
-const helpCommand = async () => {
-  return await commands.cmdHelp({})();
-};
+main();
 
-export default helpCommand;
+process.on('exit', () => {});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err.message);
+  throw err;
+});
+
+export { main, parseArgs };

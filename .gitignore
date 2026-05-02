@@ -35,3 +35,7 @@ temp/
 *.bak
 *.backup
 *.orig
+
+*.txt
+test/
+test-*.*
