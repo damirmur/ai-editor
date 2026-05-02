@@ -1,0 +1,14 @@
+{
+  "name": "ai-file",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/cli/index.mjs",
+  "scripts": {
+    "start": "node src/cli/index.mjs",
+    "dev:bot": "node --watch communication/vk-bot.mjs",
+    "dev:term": "node --watch communication/terminal-chat.mjs"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
