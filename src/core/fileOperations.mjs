@@ -25,8 +25,8 @@ export async function createDirectories(dirPath) {
   try {
     // Use recursive flag to create parent directories automatically
     await fs.mkdir(dirPath, { recursive: true });
-    
-    return { success: true };
+return { success: true, created: true };
+
   } catch (error) {
     // Directory might already exist - check gracefully
     const stat = await fs.stat(dirPath).catch(() => null);

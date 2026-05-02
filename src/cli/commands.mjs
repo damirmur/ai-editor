@@ -65,44 +65,44 @@ async function autoParseFile(filePath) {
  * Execute read command
  * @param {Object} args - Command arguments
  */
-export function cmdRead(args) {
+export async function cmdRead(args) {
   const filePath = args.path || '';
   const options = { streamLargeFiles: true, ...args };
   
-  return async () => {
-    try {
-      if (!filePath) {
-        return JSON.stringify({ error: 'Missing path argument' });
-      }
-
-      // Check if file exists
-      const existsResult = await fileExists(filePath);
-      
-      if (!existsResult.exists) {
-        return JSON.stringify({ 
-          error: `File not found: ${filePath}`,
-          suggestedAction: 'Use "mkdir" to create directory first' 
-        });
-      }
-
-      // Read file based on size and options
-      const result = await readFile(filePath, options);
-      
-      if (result.error) {
-        return JSON.stringify({ error: `Read failed: ${result.error}` });
-      }
-
-      // Auto-parse based on format
-      const parsedResult = await autoParseFile(filePath);
-      
-      return JSON.stringify(parsedResult);
-    } catch (error) {
-      return JSON.stringify({ 
-        error: `Unexpected error: ${error.message}`,
-        stack: error.stack
-      });
+  try {
+    if (!filePath) {
+      return { success: false, error: 'Missing path argument' };
     }
-  };
+
+    // Check if file exists
+    const existsResult = await fileExists(filePath);
+    
+    if (!existsResult.exists) {
+      return { 
+        success: false, 
+        error: `File not found: ${filePath}`,
+        suggestedAction: 'Use "mkdir" to create directory first' 
+      };
+    }
+
+    // Read file based on size and options
+    const result = await readFile(filePath, options);
+    
+    if (result.error) {
+      return { success: false, error: `Read failed: ${result.error}` };
+    }
+
+    // Auto-parse based on format
+    const parsedResult = await autoParseFile(filePath);
+    
+    return { success: true, data: parsedResult };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: `Unexpected error: ${error.message}`,
+      stack: error.stack
+    };
+  }
 }
 
 /**
@@ -504,6 +504,153 @@ export function cmdHelp(args) {
   });
 }
 
+/**
+ * Execute tsconfig command - parse TypeScript config with AST analysis
+ */
+export async function cmdTsconfig(args) {
+  const filePath = args.path || '';
+  const options = args;
+
+  if (!filePath) {
+    return { 
+      success: false,
+      error: 'Usage: tsconfig <path>',
+      fields: { path: 'required' }
+    };
+  }
+
+  try {
+    // Check file exists
+    const existsResult = await fileExists(filePath);
+    
+    if (!existsResult.exists) {
+      return { 
+        success: false,
+        error: `File not found: ${filePath}`
+      };
+    }
+
+    // Read and parse tsconfig
+    const readFileResult = await readFile(filePath);
+    
+    if (readFileResult.error) {
+      return { 
+        success: false,
+        error: `Read failed: ${readFileResult.error}`
+      };
+    }
+
+    // Parse using TscConfigParser
+    const parsed = TscConfigParser.parseTsConfigString(readFileResult.content);
+    
+    if (parsed?.error) {
+      return { 
+        success: false,
+        error: `Parse failed: ${parsed.error}`,
+        rawContent: readFileResult.content.substring(0, 500) + '...'
+      };
+    }
+
+    return {
+      success: true,
+      data: parsed?.value || {},
+      filePath,
+      format: 'typescript'
+    };
+  } catch (error) {
+    return { 
+      success: false,
+      error: `tsconfig command failed: ${error.message}`
+    };
+  }
+}
+
+/**
+ * Execute yaml command - parse YAML file with structure analysis
+ */
+export async function cmdYaml(args) {
+  const filePath = args.path || '';
+
+  if (!filePath) {
+    return { 
+      success: false,
+      error: 'Usage: yaml <path>',
+      fields: { path: 'required' }
+    };
+  }
+
+  try {
+    // Check file exists
+    const existsResult = await fileExists(filePath);
+    
+    if (!existsResult.exists) {
+      return { 
+        success: false,
+        error: `File not found: ${filePath}`
+      };
+    }
+
+    // Read file content
+    const readFileResult = await readFile(filePath);
+    
+    if (readFileResult.error) {
+      return { 
+        success: false,
+        error: `Read failed: ${readFileResult.error}`
+      };
+    }
+
+    // Basic YAML parsing - detect structure
+    const lines = readFileResult.content.trim().split('\n');
+    let structure = [];
+    let indentStack = [0];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith('#')) continue;
+
+      const match = line.match(/^(\s*)([^\t#]+)/);
+      if (match) {
+        const indent = match[1].length;
+        const value = match[2];
+
+        // Pop stack for lower indents
+        while (indentStack[indentStack.length - 1] > indent) {
+          indentStack.pop();
+        }
+
+        structure.push({
+          line: i + 1,
+          indent,
+          key: value.split(':')[0].trim(),
+          hasValue: value.includes(':'),
+          isArray: value.endsWith('[') || value.endsWith('('),
+          isObject: value.endsWith('{')
+        });
+
+        if (value.includes(':')) {
+          indentStack.push(indent + 2);
+        }
+      }
+    }
+
+    return {
+      success: true,
+      data: structure,
+      filePath,
+      format: 'yaml',
+      lineCount: lines.length,
+      nonCommentLines: structure.length
+    };
+  } catch (error) {
+    return { 
+      success: false,
+      error: `YAML command failed: ${error.message}`
+    };
+  }
+}
+
+// Default export for convenience (aliases)
 export default {
   cmdRead,
   cmdEdit,
@@ -512,7 +659,6 @@ export default {
   cmdMkdir,
   cmdDiff,
   cmdHelp,
-  help: cmdHelp
+  cmdTsconfig,
+  cmdYaml
 };
-
-export { cmdHelp };
