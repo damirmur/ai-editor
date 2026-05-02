@@ -11,31 +11,32 @@
 
 import { promises as fs, constants } from 'fs';
 import path from 'path';
-import { TransactionManager } from './transactionManager.mjs';
 
-const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB
+// NOTE: TransactionManager removed to avoid circular dependency
+// Import transaction functionality where needed instead
+const LARGE_FILE_THRESHOLD = 10 * 1024 * 1024; // 10MB - auto-switch to streaming mode
 
 /**
- * Create all directories in a path recursively
+ * Create all directories in a path recursively (mkdir -p equivalent)
  * @param {string} dirPath - Directory path to create
- * @returns {Promise<boolean>} True if successful, false on error
+ * @returns {Promise<{ success: boolean, exists?: boolean, error?: string }>}
  */
 export async function createDirectories(dirPath) {
   try {
+    // Use recursive flag to create parent directories automatically
     await fs.mkdir(dirPath, { recursive: true });
+    
     return { success: true };
   } catch (error) {
-    // Check if directory already exists
-    try {
-      const stat = await fs.stat(dirPath);
-      if (stat.isDirectory()) {
-        return { success: true, exists: true };
-      }
-    } catch {}
-    
+    // Directory might already exist - check gracefully
+    const stat = await fs.stat(dirPath).catch(() => null);
+    if (stat?.isDirectory()) {
+      return { success: true, exists: true };
+    }
+
     return { 
       success: false, 
-      error: error.message 
+      error: `Could not create directory: ${error.message}` 
     };
   }
 }
@@ -48,7 +49,9 @@ export async function createDirectories(dirPath) {
 export async function getFileSize(filePath) {
   try {
     const stat = await fs.stat(filePath);
-    return stat.size;
+    
+    // Return null for directories, files, or if inaccessible
+    return stat.isFile() ? stat.size : null;
   } catch (error) {
     return null;
   }
@@ -56,33 +59,36 @@ export async function getFileSize(filePath) {
 
 /**
  * Stream-based file reading for large files (>10MB)
- * Uses ReadableStream to process content chunk by chunk
+ * Uses ReadableStream to process content chunk by chunk, minimizing memory usage
+ * 
  * @param {string} filePath - Path to read
- * @param {Object} options - Reading options
- * @returns {Promise<{ content: string, chunksRead: number, totalSize?: number }>}
+ * @param {Object} options - Reading options: bufferSize (default 1MB chunks)
+ * @returns {Promise<{ content: string, chunksRead: number, totalSize: number }>}
+ * @throws Will reject if file doesn't exist or is inaccessible
  */
 export async function streamLargeFile(filePath, options = {}) {
-  const { bufferSize = 1024 * 1024 } = options; // Default 1MB chunks
-  
+  const { bufferSize = 1024 * 1024 } = options; // Default 1MB chunks for large files
+
   return new Promise(async (resolve, reject) => {
     let accumulatedChunks = [];
     let totalSize = 0;
-    
+
     try {
+      // Create stream with highWaterMark for efficient buffering
       const fileStream = fs.createReadStream(filePath, { 
         encoding: 'utf-8',
         highWaterMark: bufferSize
       });
-      
-      // Get file size first
+
+      // Get exact file size before streaming starts
       const stats = await fs.stat(filePath);
       totalSize = stats.size;
-      
+
       fileStream.on('data', (chunk) => {
         accumulatedChunks.push(chunk.toString());
-        // Progress indicator could be added here for very large files
+        // Progress indicator could be added here for very large files (>50MB)
       });
-      
+
       fileStream.on('end', () => {
         resolve({ 
           content: accumulatedChunks.join(''),
@@ -90,62 +96,11 @@ export async function streamLargeFile(filePath, options = {}) {
           totalSize 
         });
       });
-      
+
       fileStream.on('error', (error) => {
-        reject({ error: error.message });
+        reject(new Error(`Failed to stream file ${filePath}: ${error.message}`));
       });
-    } catch (error) {
-      reject({ error: error.message });
-    }
-  });
-}
 
-/**
- * Standard file reading for smaller files
- * @param {string} filePath - Path to read
- * @returns {Promise<{ content: string }>}
- */
-export async function readFile(filePath, options = {}) {
-  const { forceStream = false } = options;
-  
-  // Auto-detect streaming for large files
-  if (!forceStream) {
-    const size = await getFileSize(filePath);
-    if (size !== null && size > LARGE_FILE_THRESHOLD) {
-      return streamLargeFile(filePath, options);
-    }
-  }
-  
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return { content };
-  } catch (error) {
-    return { error: error.message };
-  }
-}
-
-/**
- * Streaming file read with chunk processing
- * For large log files where full content isn't needed at once
- * @param {string} filePath - Path to read  
- * @param {function(chunk): Promise<void>} onChunk - Callback for each chunk
- * @returns {Promise<{ success: boolean, totalSize?: number }>}
- */
-export async function streamFile(filePath, onChunk) {
-  return new Promise(async (resolve, reject) => {
-    let totalSize = 0;
-    
-    try {
-      const fileStream = fs.createReadStream(filePath, { encoding: 'utf-8' });
-      
-      const stats = await fs.stat(filePath);
-      totalSize = stats.size;
-      
-      for await (const chunk of fileStream) {
-        await onChunk(chunk.toString());
-      }
-      
-      resolve({ success: true, totalSize });
     } catch (error) {
       reject(error);
     }
@@ -153,59 +108,138 @@ export async function streamFile(filePath, onChunk) {
 }
 
 /**
- * Write file content atomically using writev for better performance
- * @param {string} filePath - Path to write
- * @param {string} content - Content to write
- * @returns {Promise<{ success: boolean, bytesWritten?: number }>}
+ * Standard file reading for smaller files (auto-detects streaming for large files)
+ * @param {string} filePath - Path to read
+ * @param {Object} options - Reading options: forceStream (force streaming regardless of size)
+ * @returns {Promise<{ content: string }|{ error: string }>}- Success or error object
  */
-export async function writeFile(filePath, content) {
+export async function readFile(filePath, options = {}) {
+  const { forceStream = false } = options;
+
+  // Auto-detect and switch to streaming for files >10MB
+  if (!forceStream) {
+    const size = await getFileSize(filePath);
+    if (size !== null && size > LARGE_FILE_THRESHOLD) {
+      return streamLargeFile(filePath, options);
+    }
+  }
+
   try {
-    const absolutePath = path.resolve(filePath);
+    // For small files: single read is faster than streaming overhead
+    const content = await fs.readFile(filePath, 'utf-8');
     
-    // Ensure parent directory exists
-    const dirPath = path.dirname(absolutePath);
-    await createDirectories(dirPath);
-    
-    // Write file with UTF-8 encoding
-    const encodedContent = Buffer.from(content, 'utf-8');
-    await fs.writeFile(absolutePath, encodedContent, { 
-      mode: 0o644,
-      flag: 'wx' // Create only if doesn't exist for atomicity
-    });
-    
-    return { success: true, bytesWritten: encodedContent.length };
+    return { 
+      content,
+      size: Buffer.byteLength(content, 'utf-8')
+    };
   } catch (error) {
-    // Handle directory creation errors vs write errors
-    const dirPath = path.dirname(path.resolve(filePath));
-    
-    try {
-      await createDirectories(dirPath);
-      return { success: false, error: 'Could not ensure parent directory exists' };
-    } catch {}
-    
-    return { success: false, error: error.message };
+    return { error: error.message };
   }
 }
 
 /**
- * Append content to existing file
+ * Streaming file read with chunk processing callback
+ * For large log files where full content isn't needed at once (e.g., line-by-line parsing)
+ * 
+ * @param {string} filePath - Path to read  
+ * @param {function(chunk: string): Promise<void>|void} onChunk - Async callback for each chunk
+ * @returns {Promise<{ success: boolean, totalSize: number }>}
+ */
+export async function streamFile(filePath, onChunk) {
+  return new Promise(async (resolve, reject) => {
+    let totalSize = 0;
+
+    try {
+      const fileStream = fs.createReadStream(filePath, { encoding: 'utf-8' });
+
+      // Get file size upfront for metadata
+      const stats = await fs.stat(filePath);
+      totalSize = stats.size;
+
+      // Process chunks as they arrive (async callback support)
+      for await (const chunk of fileStream) {
+        if (typeof onChunk === 'function') {
+          await onChunk(chunk.toString());
+        }
+      }
+
+      resolve({ success: true, totalSize });
+
+    } catch (error) {
+      reject(new Error(`Failed to stream file ${filePath}: ${error.message}`));
+    }
+  });
+}
+
+/**
+ * Write file content with atomic operation (create only if doesn't exist)
+ * Uses writev for better performance on supported platforms
+ * 
+ * @param {string} filePath - Path to write
+ * @param {string} content - Content to write
+ * @returns {Promise<{ success: boolean, bytesWritten?: number, error?: string }>}
+ */
+export async function writeFile(filePath, content) {
+  try {
+    const absolutePath = path.resolve(filePath);
+
+    // Ensure parent directory exists before writing
+    const dirPath = path.dirname(absolutePath);
+    await createDirectories(dirPath);
+
+    // Write atomically: flag 'wx' ensures file doesn't already exist (prevent overwrites)
+    const encodedContent = Buffer.from(content, 'utf-8');
+    
+    await fs.writeFile(absolutePath, encodedContent, { 
+      mode: 0o644,           // rw-r--r-- permissions
+      flag: 'wx'             // Create only if doesn't exist (atomic)
+    });
+
+    return { success: true, bytesWritten: encodedContent.length };
+
+  } catch (error) {
+    // Handle directory creation errors separately from write errors
+    const dirPath = path.dirname(path.resolve(filePath));
+    
+    try {
+      await createDirectories(dirPath);
+      
+      // Directory exists now, but write still failed - return specific error
+      return { success: false, error: 'Could not ensure parent directory exists' };
+
+    } catch (dirError) {}
+
+    return { 
+      success: false, 
+      error: `Failed to write file: ${error.message}` 
+    };
+  }
+}
+
+/**
+ * Append content to existing file (creates if doesn't exist)
  * @param {string} filePath - Path to append to
  * @param {string} content - Content to append
- * @returns {Promise<{ success: boolean, bytesWritten?: number }>}
+ * @returns {Promise<{ success: boolean, error?: string }>}
  */
 export async function appendFile(filePath, content) {
   try {
     const absolutePath = path.resolve(filePath);
-    
-    // Ensure parent directory exists
+
+    // Ensure parent directory exists first
     await createDirectories(path.dirname(absolutePath));
-    
+
+    // Append UTF-8 encoded content with 'a' flag (create if missing)
     const encodedContent = Buffer.from(content, 'utf-8');
     await fs.appendFile(absolutePath, encodedContent);
-    
+
     return { success: true };
+
   } catch (error) {
-    return { success: false, error: error.message };
+    return { 
+      success: false, 
+      error: `Failed to append to file: ${error.message}` 
+    };
   }
 }
 

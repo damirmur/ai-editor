@@ -83,12 +83,13 @@ function parseCommand(command, options) {
     ['edit', commands.cmdEdit],
     ['search', commands.cmdSearch],
     ['validate', commands.cmdValidate],
+    ['tsconfig', (args) => commands.cmdTsConfig(args)],
+    ['yaml', (args) => commands.cmdYaml(args)],
     ['mkdir', commands.cmdMkdir],
     ['diff', commands.cmdDiff]
   ];
 
   // Find matching command handler
-  // Simplified - just find by command name directly
   const selectedHandler = cmdHandlers.find(([cmdName]) => cmdName.toLowerCase() === command.toLowerCase());
   
   if (!selectedHandler) {

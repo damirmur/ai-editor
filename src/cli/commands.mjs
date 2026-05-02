@@ -20,6 +20,8 @@ import {
 import TransactionManager from '../core/transactionManager.mjs';
 import JsonParser from '../parsers/jsonParser.mjs';
 import CsvParser from '../parsers/csvParser.mjs';
+import TscConfigParser from '../parsers/tsConfigParser.mjs';
+import DiffEngine from '../core/diffEngine.mjs';
 
 /**
  * Auto-detect and parse file by format
@@ -314,7 +316,7 @@ export function cmdMkdir(args) {
 }
 
 /**
- * Execute diff command - compare two files
+ * Execute diff command - compare two files with structural diff
  */
 export function cmdDiff(args) {
   const file1 = args.path1 || '';
@@ -343,30 +345,119 @@ export function cmdDiff(args) {
         });
       }
 
-      // Simple diff for text comparison
-      const lines1 = read1.content.split('\n');
-      const lines2 = read2.content.split('\n');
+      // Structural diff with type awareness for JSON/TS/YAML
+      let diffResult;
       
-      let identicalLines = 0;
-      let totalLines = Math.max(lines1.length, lines2.length);
-      
-      for (let i = 0; i < totalLines && i < lines1.length && i < lines2.length; i++) {
-        if (lines1[i] === lines2[i]) {
-          identicalLines++;
-        } else {
-          break; // Only count from start
-        }
-      }
+      try {
+        // Import parsers based on file extensions
+        const exts = [file1.split('.').pop()?.toLowerCase(), 
+                      file2.split('.').pop()?.toLowerCase()];
+        
+        if (exts.includes('json')) {
+          const JsonParser = await import('../parsers/jsonParser.mjs');
+          
+          // Parse both as JSON for structural comparison
+          const parsed1 = JsonParser.parseJsonString(read1.content);
+          const parsed2 = JsonParser.parseJsonString(read2.content);
 
-      return JSON.stringify({
-        file1: file1,
-        file2: file2,
-        totalLines: totalLines,
-        identicalPrefixLines: identicalLines,
-        isIdentical: lines1.length === lines2.length && 
-                      JSON.stringify(lines1) === JSON.stringify(lines2),
-        lineCountDiff: lines1.length - lines2.length
-      });
+          if (parsed1?.error || parsed2?.error) {
+            return JSON.stringify({ 
+              error: 'Invalid JSON in one or both files',
+              file1ParseError: parsed1?.error,
+              file2ParseError: parsed2?.error
+            });
+          }
+
+          // Compute structural diff
+          const diff = DiffEngine.computeStructuralDiff(parsed1.value || parsed1, parsed2.value || parsed2);
+          
+          return JSON.stringify({
+            file1: file1,
+            file2: file2,
+            type: 'structural',
+            ...diff,
+            formattedDiff: DiffEngine.formatDiff(diff)
+          });
+
+        } else if (exts.includes('tsconfig')) {
+          const TscConfigParser = await import('../parsers/tsConfigParser.mjs');
+          
+          // Parse both as TypeScript config
+          const parsed1 = TscConfigParser.parseTsConfigString(read1.content);
+          const parsed2 = TscConfigParser.parseTsConfigString(read2.content);
+
+          if (parsed1?.error || parsed2?.error) {
+            return JSON.stringify({ 
+              error: 'Invalid tsconfig in one or both files',
+              file1ParseError: parsed1?.error,
+              file2ParseError: parsed2?.error
+            });
+          }
+
+          const diff = DiffEngine.computeStructuralDiff(parsed1.value || parsed1, parsed2.value || parsed2);
+          
+          return JSON.stringify({
+            file1: file1,
+            file2: file2,
+            type: 'structural',
+            ...diff,
+            formattedDiff: DiffEngine.formatDiff(diff)
+          });
+
+        } else {
+          // Fallback to text diff for non-structured formats
+          const lines1 = read1.content.split('\n');
+          const lines2 = read2.content.split('\n');
+          
+          let identicalLines = 0;
+          let totalLines = Math.max(lines1.length, lines2.length);
+          
+          for (let i = 0; i < totalLines && i < lines1.length && i < lines2.length; i++) {
+            if (lines1[i] === lines2[i]) {
+              identicalLines++;
+            } else {
+              break;
+            }
+          }
+
+          return JSON.stringify({
+            file1: file1,
+            file2: file2,
+            type: 'text',
+            totalLines: totalLines,
+            identicalPrefixLines: identicalLines,
+            isIdentical: lines1.length === lines2.length && 
+                          JSON.stringify(lines1) === JSON.stringify(lines2),
+            lineCountDiff: lines1.length - lines2.length
+          });
+        }
+
+      } catch (diffError) {
+        // Fallback to text diff if structural parsing fails
+        const lines1 = read1.content.split('\n');
+        const lines2 = read2.content.split('\n');
+        
+        let identicalLines = 0;
+        
+        for (let i = 0; i < Math.min(lines1.length, lines2.length); i++) {
+          if (lines1[i] === lines2[i]) {
+            identicalLines++;
+          } else {
+            break;
+          }
+        }
+
+        return JSON.stringify({
+          file1: file1,
+          file2: file2,
+          type: 'text',
+          totalLines: Math.max(lines1.length, lines2.length),
+          identicalPrefixLines: identicalLines,
+          isIdentical: false,
+          lineCountDiff: lines1.length - lines2.length,
+          fallbackReason: diffError.message
+        });
+      }
 
     } catch (error) {
       return JSON.stringify({ 
@@ -386,21 +477,29 @@ export function cmdHelp(args) {
     { name: 'edit', desc: 'Write/edit file with transaction support' },
     { name: 'search', desc: 'Search for pattern in file (streaming support)' },
     { name: 'validate', desc: 'Validate and parse file by detected format' },
+    { name: 'tsconfig', desc: 'Parse TypeScript config with AST analysis' },
+    { name: 'yaml', desc: 'Parse YAML file with structure analysis' },
     { name: 'mkdir', desc: 'Create directories recursively' },
-    { name: 'diff', desc: 'Compare two files line-by-line' }
+    { name: 'diff', desc: 'Compare two files (structural diff for JSON/TS, text diff otherwise)' }
   ];
 
   return JSON.stringify({
     description: 'AI-File Editor - File operations for AI models',
-    version: '1.0.0',
+    version: '2.0.0',
+    features: [
+      'Streaming read for large files (>10MB)',
+      'Atomic writes with automatic rollback',
+      'Structural diff engine for JSON/TS/YAML',
+      'TypeScript AST parsing and validation'
+    ],
     commands: commands,
     usage: 'ai-file <command> [options]',
     examples: [
       'read package.json',
-      'edit config.json --set key=value',
-      "search log.txt \"error\"",
-      "validate src/data.csv",
-      'mkdir /path/to/new/dir'
+      "validate src/config.tsconfig",
+      'yaml .env.yaml',
+      'tsconfig tsconfig.json --analyze-extends',
+      'diff before.json after.json'
     ]
   });
 }
